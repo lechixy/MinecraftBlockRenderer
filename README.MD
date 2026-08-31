@@ -10,7 +10,7 @@ A fast, headless, lightweight software rasterizer written in **Rust**. It parses
 * **Lightweight WebP Output:** Exports static and animated blocks in high-performance `.webp` format for web optimization.
 * **Robust Texture Resolution:** Recursively resolves model inheritance (`parent`) and texture aliases (`#all`, `#texture`, `force_translucent`, `sprite`).
 
-## Showcase
+## 💖 Showcase
 
 You can see the output in the `/output` folder. Here are some sample renders generated directly with the renderer:
 
