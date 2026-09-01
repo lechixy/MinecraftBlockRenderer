@@ -6,7 +6,10 @@ A fast, headless, lightweight software rasterizer written in **Rust**. It parses
 
 * **Fast & Headless:** 100% CPU-based software rasterizer using `glam` and `image`. No GPU, OpenGL, Vulkan, or window context required.
 * **Pixel-Perfect GUI Alignment:** Replicates Minecraft's inventory display transforms with zero-margin viewport clipping (tight-fit bounding boxes).
-* **Animated Texture Support:** Parses `.png.mcmeta` definitions (frame sequence, delays, and linear interpolation) and exports animated WebP files.
+* **4x SSAA Anti-Aliasing:** Softens diagonal edges using 2x2 subpixel supersampling and alpha-weighted downsampling to match Minecraft's GUI smoothness.
+* **Vanilla Face Shading:** Accurately replicates Minecraft's orientation-based lighting coefficients (Down: 0.5, Up: 1.0, North/South: 0.8, West/East: 0.6) with `shade: false` element support.
+* **Extended Model Support:** Full hierarchy resolution and multi-element rendering for cubes, columns, stairs, slabs, carpets, and more.
+* **Animated Texture Support:** Parses `.png.mcmeta` definitions (frame sequence, delays, and optional linear interpolation) and exports animated WebP files.
 * **Lightweight WebP Output:** Exports static and animated blocks in high-performance `.webp` format for web optimization.
 * **Robust Texture Resolution:** Recursively resolves model inheritance (`parent`) and texture aliases (`#all`, `#texture`, `force_translucent`, `sprite`).
 
@@ -31,12 +34,14 @@ You can see the output in the `/output` folder. Here are some sample renders gen
 
 The easiest way to run the renderer without installing Rust:
 
-1. Download the latest `mc_renderer.exe` from the [Releases](https://github.com/lechixy/MinecraftBlockRenderer/releases) page.
+1. Download the latest `mc_renderer.exe` from the [Releases](https://www.google.com/search?q=https://github.com/lechixy/MinecraftBlockRenderer/releases) page.
 2. Download the required Minecraft assets from **[mcasset.cloud](https://mcasset.cloud/)**:
-   * Select your target Minecraft version (e.g. `26.2` or any).
-   * Navigate to `assets/minecraft/models/block/` and download `_all.json` (or generate/merge block models into `_all.json`).
-   * Navigate to `assets/minecraft/textures/block/` and download the texture files (including `.png` and `.png.mcmeta` files).
-3. Organize the files right next to `mc_renderer.exe` in the following layout:
+
+* Select your target Minecraft version (e.g. `26.2` or any).
+* Navigate to `assets/minecraft/models/block/` and download `_all.json` (or generate/merge block models into `_all.json`).
+* Navigate to `assets/minecraft/textures/block/` and download the texture files (including `.png` and `.png.mcmeta` files).
+
+1. Organize the files right next to `mc_renderer.exe` in the following layout:
 
 ```text
 my_render_folder/
@@ -51,7 +56,6 @@ my_render_folder/
             ├── sea_lantern.png
             ├── sea_lantern.png.mcmeta
             └── ...
-
 ```
 
 1. Double-click `mc_renderer.exe` (or run it via Command Prompt).
@@ -72,7 +76,6 @@ minecraft/
         ├── sea_lantern.png
         ├── sea_lantern.png.mcmeta
         └── ...
-
 ```
 
 ### Obtaining Assets via [mcasset.cloud](https://mcasset.cloud/)
@@ -91,14 +94,12 @@ You can run the program with optional flags to customize paths and render sizes:
 
 ```cmd
 mc_renderer.exe
-
 ```
 
 ### Custom Arguments
 
 ```cmd
-mc_renderer.exe --minecraft "C:/MinecraftAssets/minecraft" --output "./custom_output/" --render-resolution 256
-
+mc_renderer.exe --minecraft "C:/MinecraftAssets/minecraft" --output "./custom_output/" --render-resolution 256 --interpolate
 ```
 
 ### CLI Flags
@@ -107,7 +108,9 @@ mc_renderer.exe --minecraft "C:/MinecraftAssets/minecraft" --output "./custom_ou
 | --- | --- | --- |
 | `--minecraft <path>` | Auto-detect | Path to the `minecraft` asset root directory. |
 | `--output <path>` | `./output/` | Destination folder for rendered `.webp` images. |
-| `--render-resolution <px>` | `128` | Output resolution in square pixels (e.g. `16`, `64`, `128`, `256`). |
+| `--render-resolution <px>` | `128` | Output resolution in square pixels (e.g. `16`, `64`, `128`,`256`). |
+| `--interpolate`, `-i` | `false` | Enable linear frame interpolation for animated textures with `interpolate: true`. |
+| `--no-aa` | `false` | Disable 4x SSAA anti-aliasing (enabled by default). |
 
 ## 🛠️ Building from Source
 
@@ -120,9 +123,8 @@ mc_renderer.exe --minecraft "C:/MinecraftAssets/minecraft" --output "./custom_ou
 1. Clone the repository:
 
 ```bash
-git clone [https://github.com/lechixy/MinecraftBlockRenderer.git](https://github.com/lechixy/MinecraftBlockRenderer.git)
+git clone https://github.com/lechixy/MinecraftBlockRenderer.git
 cd MinecraftBlockRenderer
-
 ```
 
 1. Download and set up the `assets/minecraft` directory structure as described in the [Asset Directory Structure](https://www.google.com/search?q=%23-required-asset-directory-structure) section using [mcasset.cloud](https://mcasset.cloud/).
@@ -130,14 +132,12 @@ cd MinecraftBlockRenderer
 
 ```bash
 cargo build --release
-
 ```
 
 1. Run the renderer:
 
 ```bash
-cargo run --release -- --render-resolution 128
-
+cargo run --release -- --render-resolution 128 --interpolate
 ```
 
 ## 📦 Dependencies

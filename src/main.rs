@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec2, Vec3, Vec4, vec2, vec3, vec4};
+use glam::{vec2, vec3, vec4, Mat4, Vec2, Vec3, Vec4};
 use image::{Rgba, RgbaImage};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -22,6 +22,7 @@ pub struct MinecraftModel {
 pub struct ModelElement {
     pub from: [f32; 3],
     pub to: [f32; 3],
+    pub shade: Option<bool>,
     pub faces: HashMap<String, ModelFace>,
 }
 
@@ -59,7 +60,6 @@ pub struct AnimationMeta {
     pub frames: Option<Vec<serde_json::Value>>,
 }
 
-// Linear interpolation between two frames
 fn interpolate_frames(img_a: &RgbaImage, img_b: &RgbaImage, t: f32) -> RgbaImage {
     let (w, h) = (img_a.width(), img_a.height());
     let mut out = RgbaImage::new(w, h);
@@ -87,7 +87,7 @@ struct AnimatedTexture {
 }
 
 impl AnimatedTexture {
-    pub fn from_file(base_path: &Path) -> Option<Self> {
+    pub fn from_file(base_path: &Path, allow_interpolation: bool) -> Option<Self> {
         let png_path = base_path.with_extension("png");
         let meta_path = base_path.with_extension("png.mcmeta");
 
@@ -114,7 +114,7 @@ impl AnimatedTexture {
                 if let Some(anim) = meta.animation {
                     base_frametime = anim.frametime.unwrap_or(1);
                     custom_frames = anim.frames;
-                    should_interpolate = anim.interpolate.unwrap_or(false);
+                    should_interpolate = anim.interpolate.unwrap_or(false) && allow_interpolation;
                 }
             }
         }
@@ -136,10 +136,7 @@ impl AnimatedTexture {
                     }
                 } else if let Some(obj) = item.as_object() {
                     let idx = obj.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let time = obj
-                        .get("time")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(base_frametime as u64) as u32;
+                    let time = obj.get("time").and_then(|v| v.as_u64()).unwrap_or(base_frametime as u64) as u32;
                     if idx < extracted_slices.len() {
                         keyframes.push((idx, time));
                     }
@@ -174,7 +171,7 @@ impl AnimatedTexture {
                     } else {
                         final_frames.push(interpolate_frames(curr_img, next_img, t));
                     }
-                    final_delays.push(50); // 1 tick = 50ms
+                    final_delays.push(50);
                 }
             }
         } else {
@@ -202,19 +199,16 @@ fn resolve_model(name: &str, models: &HashMap<String, MinecraftModel>) -> Minecr
         .get(&normalized)
         .cloned()
         .unwrap_or_else(|| MinecraftModel {
-            parent: None,
-            textures: None,
-            elements: None,
-            display: None,
+            parent: None, textures: None, elements: None, display: None,
         });
 
     if let Some(parent_name) = &current.parent {
         let parent_model = resolve_model(parent_name, models);
-
+        
         if current.elements.is_none() {
             current.elements = parent_model.elements.clone();
         }
-
+        
         let mut merged_tex = parent_model.textures.unwrap_or_default();
         if let Some(child_tex) = current.textures {
             merged_tex.extend(child_tex);
@@ -254,13 +248,8 @@ fn resolve_texture(mut tex: String, textures: &HashMap<String, serde_json::Value
 
 // --- Software Rasterizer ---
 fn draw_triangle(
-    fb: &mut [u32],
-    zb: &mut [f32],
-    w: usize,
-    h: usize,
-    v0: Vertex,
-    v1: Vertex,
-    v2: Vertex,
+    fb: &mut [u32], zb: &mut [f32], w: usize, h: usize,
+    v0: Vertex, v1: Vertex, v2: Vertex,
     tex: &RgbaImage,
 ) {
     let edge = |a: &Vec4, b: &Vec4, c: &Vec4| -> f32 {
@@ -268,9 +257,7 @@ fn draw_triangle(
     };
 
     let mut area = edge(&v0.pos, &v1.pos, &v2.pos);
-    if area.abs() < 1e-5 {
-        return;
-    }
+    if area.abs() < 1e-5 { return; }
 
     let (v0, v1, v2) = if area < 0.0 {
         area = -area;
@@ -298,7 +285,7 @@ fn draw_triangle(
 
                 let z = w0 * v0.pos.z + w1 * v1.pos.z + w2 * v2.pos.z;
                 let idx = y * w + x;
-
+                
                 if z < zb[idx] {
                     let uv = v0.uv * w0 + v1.uv * w1 + v2.uv * w2;
                     let tx = (uv.x * tex.width() as f32) as u32;
@@ -347,20 +334,26 @@ fn draw_triangle(
     }
 }
 
+// 4x SSAA Render ve Downsampling
 fn render_single_frame(
     elements: &[ModelElement],
     textures: &HashMap<String, serde_json::Value>,
     texture_cache: &HashMap<String, AnimatedTexture>,
     mvp: Mat4,
     frame_index: usize,
-    render_size: usize,
+    target_size: usize,
+    use_aa: bool,
 ) -> RgbaImage {
+    let scale = if use_aa { 2 } else { 1 };
+    let render_size = target_size * scale;
+
     let mut frame_buffer = vec![0u32; render_size * render_size];
     let mut z_buffer = vec![f32::MAX; render_size * render_size];
 
     for el in elements {
         let min_el = Vec3::from(el.from) / 16.0 - 0.5;
         let max_el = Vec3::from(el.to) / 16.0 - 0.5;
+        let shade_enabled = el.shade.unwrap_or(true);
 
         for (face_name, face) in &el.faces {
             let texture_path = resolve_texture(face.texture.clone(), textures);
@@ -370,53 +363,25 @@ fn render_single_frame(
             };
             let tex = animated_tex.get_frame(frame_index);
 
-            let brightness = match face_name.as_str() {
-                "down" => 0.5,
-                "up" => 1.0,
-                "north" => 0.8,
-                "south" => 0.8,
-                "west" => 0.6,
-                "east" => 0.6,
-                _ => 1.0,
+            let brightness = if shade_enabled {
+                match face_name.as_str() {
+                    "down" => 0.5,
+                    "up" => 1.0,
+                    "north" | "south" => 0.8,
+                    "west" | "east" => 0.6,
+                    _ => 1.0,
+                }
+            } else {
+                1.0
             };
 
             let corners = match face_name.as_str() {
-                "north" => [
-                    vec3(max_el.x, max_el.y, min_el.z),
-                    vec3(min_el.x, max_el.y, min_el.z),
-                    vec3(max_el.x, min_el.y, min_el.z),
-                    vec3(min_el.x, min_el.y, min_el.z),
-                ],
-                "south" => [
-                    vec3(min_el.x, max_el.y, max_el.z),
-                    vec3(max_el.x, max_el.y, max_el.z),
-                    vec3(min_el.x, min_el.y, max_el.z),
-                    vec3(max_el.x, min_el.y, max_el.z),
-                ],
-                "west" => [
-                    vec3(min_el.x, max_el.y, min_el.z),
-                    vec3(min_el.x, max_el.y, max_el.z),
-                    vec3(min_el.x, min_el.y, min_el.z),
-                    vec3(min_el.x, min_el.y, max_el.z),
-                ],
-                "east" => [
-                    vec3(max_el.x, max_el.y, max_el.z),
-                    vec3(max_el.x, max_el.y, min_el.z),
-                    vec3(max_el.x, min_el.y, max_el.z),
-                    vec3(max_el.x, min_el.y, min_el.z),
-                ],
-                "up" => [
-                    vec3(min_el.x, max_el.y, min_el.z),
-                    vec3(max_el.x, max_el.y, min_el.z),
-                    vec3(min_el.x, max_el.y, max_el.z),
-                    vec3(max_el.x, max_el.y, max_el.z),
-                ],
-                "down" => [
-                    vec3(min_el.x, min_el.y, max_el.z),
-                    vec3(max_el.x, min_el.y, max_el.z),
-                    vec3(min_el.x, min_el.y, min_el.z),
-                    vec3(max_el.x, min_el.y, min_el.z),
-                ],
+                "north" => [vec3(max_el.x, max_el.y, min_el.z), vec3(min_el.x, max_el.y, min_el.z), vec3(max_el.x, min_el.y, min_el.z), vec3(min_el.x, min_el.y, min_el.z)],
+                "south" => [vec3(min_el.x, max_el.y, max_el.z), vec3(max_el.x, max_el.y, max_el.z), vec3(min_el.x, min_el.y, max_el.z), vec3(max_el.x, min_el.y, max_el.z)],
+                "west"  => [vec3(min_el.x, max_el.y, min_el.z), vec3(min_el.x, max_el.y, max_el.z), vec3(min_el.x, min_el.y, min_el.z), vec3(min_el.x, min_el.y, max_el.z)],
+                "east"  => [vec3(max_el.x, max_el.y, max_el.z), vec3(max_el.x, max_el.y, min_el.z), vec3(max_el.x, min_el.y, max_el.z), vec3(max_el.x, min_el.y, min_el.z)],
+                "up"    => [vec3(min_el.x, max_el.y, min_el.z), vec3(max_el.x, max_el.y, min_el.z), vec3(min_el.x, max_el.y, max_el.z), vec3(max_el.x, max_el.y, max_el.z)],
+                "down"  => [vec3(min_el.x, min_el.y, max_el.z), vec3(max_el.x, min_el.y, max_el.z), vec3(min_el.x, min_el.y, min_el.z), vec3(max_el.x, min_el.y, min_el.z)],
                 _ => continue,
             };
 
@@ -433,9 +398,9 @@ fn render_single_frame(
             let mut clip_verts = Vec::new();
             for i in 0..4 {
                 let clip_pos = mvp * Vec4::new(corners[i].x, corners[i].y, corners[i].z, 1.0);
-
+                
                 let screen_x = (clip_pos.x / clip_pos.w * 0.5 + 0.5) * render_size as f32;
-                let screen_y = (-clip_pos.y / clip_pos.w * 0.5 + 0.5) * render_size as f32;
+                let screen_y = (-clip_pos.y / clip_pos.w * 0.5 + 0.5) * render_size as f32; 
                 let screen_z = clip_pos.z / clip_pos.w;
 
                 clip_verts.push(Vertex {
@@ -445,40 +410,72 @@ fn render_single_frame(
                 });
             }
 
-            draw_triangle(
-                &mut frame_buffer,
-                &mut z_buffer,
-                render_size,
-                render_size,
-                clip_verts[0].clone(),
-                clip_verts[1].clone(),
-                clip_verts[2].clone(),
-                tex,
-            );
-            draw_triangle(
-                &mut frame_buffer,
-                &mut z_buffer,
-                render_size,
-                render_size,
-                clip_verts[1].clone(),
-                clip_verts[3].clone(),
-                clip_verts[2].clone(),
-                tex,
-            );
+            draw_triangle(&mut frame_buffer, &mut z_buffer, render_size, render_size, clip_verts[0].clone(), clip_verts[1].clone(), clip_verts[2].clone(), tex);
+            draw_triangle(&mut frame_buffer, &mut z_buffer, render_size, render_size, clip_verts[1].clone(), clip_verts[3].clone(), clip_verts[2].clone(), tex);
         }
     }
 
-    let mut out_img = RgbaImage::new(render_size as u32, render_size as u32);
-    for y in 0..render_size {
-        for x in 0..render_size {
-            let pixel = frame_buffer[y * render_size + x];
-            let r = ((pixel >> 16) & 0xFF) as u8;
-            let g = ((pixel >> 8) & 0xFF) as u8;
-            let b = (pixel & 0xFF) as u8;
-            let a = ((pixel >> 24) & 0xFF) as u8;
-            out_img.put_pixel(x as u32, y as u32, Rgba([r, g, b, a]));
+    let mut out_img = RgbaImage::new(target_size as u32, target_size as u32);
+
+    if use_aa {
+        // 2x2 Subpixel Box Filtering (Alpha-Weighted Downsample)
+        for y in 0..target_size {
+            for x in 0..target_size {
+                let mut sum_r = 0.0;
+                let mut sum_g = 0.0;
+                let mut sum_b = 0.0;
+                let mut sum_a = 0.0;
+
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let sx = x * 2 + dx;
+                        let sy = y * 2 + dy;
+                        let pixel = frame_buffer[sy * render_size + sx];
+
+                        let a = ((pixel >> 24) & 0xFF) as f32 / 255.0;
+                        let r = ((pixel >> 16) & 0xFF) as f32;
+                        let g = ((pixel >> 8) & 0xFF) as f32;
+                        let b = (pixel & 0xFF) as f32;
+
+                        sum_r += r * a;
+                        sum_g += g * a;
+                        sum_b += b * a;
+                        sum_a += a;
+                    }
+                }
+
+                let final_a = sum_a / 4.0;
+                let (final_r, final_g, final_b) = if sum_a > 0.0 {
+                    (sum_r / sum_a, sum_g / sum_a, sum_b / sum_a)
+                } else {
+                    (0.0, 0.0, 0.0)
+                };
+
+                out_img.put_pixel(
+                    x as u32,
+                    y as u32,
+                    Rgba([
+                        final_r.round() as u8,
+                        final_g.round() as u8,
+                        final_b.round() as u8,
+                        (final_a * 255.0).round() as u8,
+                    ]),
+                );
+            }
+        }
+    } else {
+        for y in 0..target_size {
+            for x in 0..target_size {
+                let pixel = frame_buffer[y * render_size + x];
+                let r = ((pixel >> 16) & 0xFF) as u8;
+                let g = ((pixel >> 8) & 0xFF) as u8;
+                let b = (pixel & 0xFF) as u8;
+                let a = ((pixel >> 24) & 0xFF) as u8;
+                out_img.put_pixel(x as u32, y as u32, Rgba([r, g, b, a]));
+            }
         }
     }
+
     out_img
 }
 
@@ -503,7 +500,6 @@ fn save_as_animated_webp(
 }
 
 fn resolve_minecraft_base(custom_path: Option<&str>) -> Option<(PathBuf, &'static str)> {
-    // 1. --minecraft argümanı ile özel yol verilmişse
     if let Some(path_str) = custom_path {
         let arg_path = PathBuf::from(path_str);
         if arg_path.exists() && arg_path.join("models/block/_all.json").exists() {
@@ -511,7 +507,6 @@ fn resolve_minecraft_base(custom_path: Option<&str>) -> Option<(PathBuf, &'stati
         }
     }
 
-    // 2. Executable yanında ara
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
             let exe_mc = exe_dir.join("minecraft");
@@ -521,17 +516,13 @@ fn resolve_minecraft_base(custom_path: Option<&str>) -> Option<(PathBuf, &'stati
         }
     }
 
-    // 3. Mevcut çalışma dizininde ara
     let cur_mc = PathBuf::from("minecraft");
     if cur_mc.exists() && cur_mc.join("models/block/_all.json").exists() {
         return Some((cur_mc, "Detected in current working directory (minecraft/)"));
     }
     let cur_assets_mc = PathBuf::from("assets/minecraft");
     if cur_assets_mc.exists() && cur_assets_mc.join("models/block/_all.json").exists() {
-        return Some((
-            cur_assets_mc,
-            "Detected in current working directory (assets/minecraft/)",
-        ));
+        return Some((cur_assets_mc, "Detected in current working directory (assets/minecraft/)"));
     }
 
     None
@@ -540,12 +531,12 @@ fn resolve_minecraft_base(custom_path: Option<&str>) -> Option<(PathBuf, &'stati
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Default Değerler
     let mut custom_mc_path: Option<String> = None;
     let mut save_path = String::from("./output/");
     let mut render_size: usize = 128;
+    let mut allow_interpolation = false;
+    let mut use_aa = true; // Anti-aliasing varsayılan olarak açık
 
-    // Argüman Ayrıştırıcı (--minecraft, --output, --render-resolution)
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
@@ -573,12 +564,17 @@ fn main() {
                     i += 1;
                 }
             }
+            "--interpolate" | "-i" => {
+                allow_interpolation = true;
+            }
+            "--no-aa" => {
+                use_aa = false;
+            }
             _ => {}
         }
         i += 1;
     }
 
-    // Asset dizinini çöz
     let (mc_base, source_description) = match resolve_minecraft_base(custom_mc_path.as_deref()) {
         Some(res) => res,
         None => {
@@ -589,22 +585,21 @@ fn main() {
             eprintln!("  --minecraft <path>          Path to 'minecraft' folder");
             eprintln!("  --output <path>             Custom output folder (default: ./output/)");
             eprintln!("  --render-resolution <size>  Render resolution in pixels (default: 128)");
+            eprintln!("  --interpolate, -i           Enable animation frame interpolation (default: false)");
+            eprintln!("  --no-aa                     Disable 4x SSAA anti-aliasing (default: enabled)");
             eprintln!("\nExample usage:");
-            eprintln!(
-                "  mc_renderer --minecraft \"C:/assets/minecraft\" --output \"./renders/\" --render-resolution 256"
-            );
+            eprintln!("  mc_renderer --minecraft \"C:/assets/minecraft\" --output \"./renders/\" --render-resolution 256");
             eprintln!("=======================================================\n");
             std::process::exit(1);
         }
     };
 
     println!("--------------------------------------------------");
-    println!(
-        "Minecraft Asset Location : {:?}",
-        fs::canonicalize(&mc_base).unwrap_or(mc_base.clone())
-    );
+    println!("Minecraft Asset Location : {:?}", fs::canonicalize(&mc_base).unwrap_or(mc_base.clone()));
     println!("Resolution Source        : {}", source_description);
     println!("Render Resolution        : {}x{}", render_size, render_size);
+    println!("Anti-Aliasing (4x SSAA)  : {}", use_aa);
+    println!("Frame Interpolation      : {}", allow_interpolation);
     println!("Output Directory         : {}", save_path);
     println!("--------------------------------------------------");
 
@@ -616,7 +611,6 @@ fn main() {
     let all_models: HashMap<String, MinecraftModel> =
         serde_json::from_str(&models_json).expect("Failed to parse models JSON.");
 
-    // Eski save path klasörünü temizle
     if Path::new(&save_path).exists() {
         fs::remove_dir_all(&save_path).expect("Failed to clean previous output directory!");
     }
@@ -643,6 +637,12 @@ fn main() {
             "minecraft:block/cube_column",
             "minecraft:block/cube_bottom_top",
             "minecraft:block/cube",
+            "minecraft:block/stairs",
+            "block/stairs",
+            "minecraft:block/slab",
+            "block/slab",
+            "minecraft:block/carpet",
+            "block/carpet",
         ];
         if !only_render_this_parents.contains(&model.parent.as_deref().unwrap_or("")) {
             continue;
@@ -657,7 +657,7 @@ fn main() {
                 let texture_path = resolve_texture(face.texture.clone(), &textures);
                 if !global_texture_cache.contains_key(&texture_path) {
                     let full_path = textures_base_path.join(&texture_path);
-                    if let Some(anim_tex) = AnimatedTexture::from_file(&full_path) {
+                    if let Some(anim_tex) = AnimatedTexture::from_file(&full_path, allow_interpolation) {
                         global_texture_cache.insert(texture_path.clone(), anim_tex);
                     } else {
                         all_textures_found = false;
@@ -681,12 +681,8 @@ fn main() {
             continue;
         }
 
-        let gui_display = model
-            .display
-            .unwrap_or_default()
-            .get("gui")
-            .cloned()
-            .unwrap_or_else(|| DisplayTransform {
+        let gui_display = model.display.unwrap_or_default()
+            .get("gui").cloned().unwrap_or_else(|| DisplayTransform {
                 rotation: Some([30.0, 225.0, 0.0]),
                 translation: Some([0.0, 0.0, 0.0]),
                 scale: Some([0.625, 0.625, 0.625]),
@@ -696,15 +692,9 @@ fn main() {
         let trans = gui_display.translation.unwrap_or([0.0, 0.0, 0.0]);
         let scale = gui_display.scale.unwrap_or([0.625, 0.625, 0.625]);
 
-        let model_matrix =
-            Mat4::from_translation(Vec3::new(trans[0] / 16.0, trans[1] / 16.0, trans[2] / 16.0))
-                * Mat4::from_euler(
-                    glam::EulerRot::XYZ,
-                    rot[0].to_radians(),
-                    rot[1].to_radians(),
-                    rot[2].to_radians(),
-                )
-                * Mat4::from_scale(Vec3::new(scale[0], scale[1], scale[2]));
+        let model_matrix = Mat4::from_translation(Vec3::new(trans[0] / 16.0, trans[1] / 16.0, trans[2] / 16.0))
+            * Mat4::from_euler(glam::EulerRot::XYZ, rot[0].to_radians(), rot[1].to_radians(), rot[2].to_radians())
+            * Mat4::from_scale(Vec3::new(scale[0], scale[1], scale[2]));
 
         let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
         let view_model = view * model_matrix;
@@ -719,7 +709,7 @@ fn main() {
                 let x = if i & 1 == 0 { min_el.x } else { max_el.x };
                 let y = if i & 2 == 0 { min_el.y } else { max_el.y };
                 let z = if i & 4 == 0 { min_el.z } else { max_el.z };
-
+                
                 let v_pos = view_model * Vec4::new(x, y, z, 1.0);
                 min_bound = min_bound.min(Vec2::new(v_pos.x, v_pos.y));
                 max_bound = max_bound.max(Vec2::new(v_pos.x, v_pos.y));
@@ -731,47 +721,24 @@ fn main() {
         let half_size = size.x.max(size.y) / 2.0;
 
         let proj = Mat4::orthographic_rh(
-            center.x - half_size,
-            center.x + half_size,
-            center.y - half_size,
-            center.y + half_size,
-            0.01,
-            100.0,
+            center.x - half_size, center.x + half_size,
+            center.y - half_size, center.y + half_size,
+            0.01, 100.0,
         );
         let mvp = proj * view_model;
 
         let out_path = format!("{}{}.webp", save_path, target_block);
 
         let success = if max_animation_frames <= 1 {
-            let single_frame = render_single_frame(
-                &elements,
-                &textures,
-                &global_texture_cache,
-                mvp,
-                0,
-                render_size,
-            );
+            let single_frame = render_single_frame(&elements, &textures, &global_texture_cache, mvp, 0, render_size, use_aa);
             single_frame.save(&out_path).is_ok()
         } else {
             let mut rendered_frames = Vec::new();
             for f in 0..max_animation_frames {
-                let frame = render_single_frame(
-                    &elements,
-                    &textures,
-                    &global_texture_cache,
-                    mvp,
-                    f,
-                    render_size,
-                );
+                let frame = render_single_frame(&elements, &textures, &global_texture_cache, mvp, f, render_size, use_aa);
                 rendered_frames.push(frame);
             }
-            save_as_animated_webp(
-                &out_path,
-                &rendered_frames,
-                &frame_delays,
-                render_size as u32,
-            )
-            .is_ok()
+            save_as_animated_webp(&out_path, &rendered_frames, &frame_delays, render_size as u32).is_ok()
         };
 
         if success {
