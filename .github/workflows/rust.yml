@@ -25,5 +25,7 @@ jobs:
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/minecraft_block_renderer.exe
+          files: target/release/*.exe # Tam isim yerine dizindeki .exe dosyasını dinamik olarak yakalar
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
